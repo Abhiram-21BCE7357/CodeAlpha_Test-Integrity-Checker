@@ -1,14 +1,16 @@
 Function Get-FileHashCustom($filepath) {
-    $filehash = Get-FileHash -Path $filepath -Algorithm SHA512
-    return $filehash
+    try {
+        $filehash = Get-FileHash -Path $filepath -Algorithm SHA512 -ErrorAction Stop
+        return $filehash
+    } catch {
+        Write-Host "Error calculating hash for $filepath" -ForegroundColor Red
+        return $null
+    }
 }
 
 Function Remove-BaselineIfAlreadyExists {
-    $baselineExists = Test-Path -Path .\baseline.txt
-
-    if ($baselineExists) {
-        # Delete it
-        Remove-Item -Path .\baseline.txt
+    if (Test-Path -Path .\baseline.txt) {
+        Remove-Item -Path .\baseline.txt -ErrorAction Stop
     }
 }
 
@@ -21,80 +23,77 @@ Write-Host ""
 $response = Read-Host -Prompt "Please enter 'A' or 'B'"
 Write-Host ""
 
-# Get the directory where the script is located
 $scriptDirectory = $PSScriptRoot
+$filesDirectory = "$scriptDirectory\Files"
+
+if (-not (Test-Path -Path $filesDirectory)) {
+    Write-Host "The 'Files' directory does not exist at the expected location: $filesDirectory" -ForegroundColor Red
+    exit
+}
 
 if ($response -eq "A") {
-    # Delete baseline.txt if it already exists
     Remove-BaselineIfAlreadyExists
 
-    # Calculate Hash from the target files and store in baseline.txt
-    # Collect all files in the target folder
-    $files = Get-ChildItem -Path "$scriptDirectory\Files"
+    $files = Get-ChildItem -Path $filesDirectory
 
-    # For each file, calculate the hash, and write to baseline.txt
     foreach ($f in $files) {
         $hash = Get-FileHashCustom $f.FullName
-        "$($f.FullName)|$($hash.Hash)" | Out-File -FilePath .\baseline.txt -Append
+        if ($hash) {
+            "$($f.FullName)|$($hash.Hash)" | Out-File -FilePath .\baseline.txt -Append
+        }
     }
 }
 elseif ($response -eq "B") {
     $fileHashDictionary = @{}
 
-    # Load file|hash from baseline.txt and store them in a dictionary
-    $filePathsAndHashes = Get-Content -Path "$scriptDirectory\baseline.txt"
+    if (Test-Path -Path "$scriptDirectory\baseline.txt") {
+        $filePathsAndHashes = Get-Content -Path "$scriptDirectory\baseline.txt"
 
-    foreach ($f in $filePathsAndHashes) {
-        $path, $hash = $f -split '\|'
-        $fileHashDictionary[$path] = $hash
+        foreach ($f in $filePathsAndHashes) {
+            $path, $hash = $f -split '\|'
+            $fileHashDictionary[$path] = $hash
+        }
+    } else {
+        Write-Host "Baseline file not found!" -ForegroundColor Red
+        exit
     }
 
-    # Begin continuously monitoring files with saved Baseline
     while ($true) {
         Start-Sleep -Seconds 1
 
-        $files = Get-ChildItem -Path "$scriptDirectory\Files"
-
+        $files = Get-ChildItem -Path $filesDirectory
         $keysToRemove = @()
 
-        # For each file, calculate the hash, and write to baseline.txt
         foreach ($f in $files) {
             $hash = Get-FileHashCustom $f.FullName
 
-            # Notify if a new file has been created
-            if (-not $fileHashDictionary.ContainsKey($f.FullName)) {
-                # A new file has been created!
-                Write-Host "$($f.FullName) has been created!" -ForegroundColor Green
-
-                # Add the new file and its hash to the dictionary
-                $fileHashDictionary[$f.FullName] = $hash.Hash
-            }
-            else {
-                # Notify if a file has been changed
-                if ($fileHashDictionary[$f.FullName] -ne $hash.Hash) {
-                    # File has been compromised, notify the user
-                    Write-Host "$($f.FullName) has changed!!!" -ForegroundColor Yellow
+            if ($hash) {
+                if (-not $fileHashDictionary.ContainsKey($f.FullName)) {
+                    Write-Host "$($f.FullName) has been created!" -ForegroundColor Green
+                    $fileHashDictionary[$f.FullName] = $hash.Hash
+                } else {
+                    if ($fileHashDictionary[$f.FullName] -ne $hash.Hash) {
+                        Write-Host "$($f.FullName) has changed!!!" -ForegroundColor Yellow
+                    }
                 }
             }
 
             $keysToRemove += $f.FullName
         }
 
-        # Check if baseline files have been deleted
         foreach ($key in $fileHashDictionary.Keys) {
             if (-not $keysToRemove.Contains($key)) {
-                $baselineFileStillExists = Test-Path -Path $key
-                if (-not $baselineFileStillExists) {
-                    # One of the baseline files must have been deleted, notify the user
+                if (-not (Test-Path -Path $key)) {
                     Write-Host "$($key) has been deleted!" -ForegroundColor DarkRed -BackgroundColor Gray
                     $keysToRemove += $key
                 }
             }
         }
 
-        # Remove keys from the dictionary
         foreach ($key in $keysToRemove) {
             $fileHashDictionary.Remove($key)
         }
     }
+} else {
+    Write-Host "Invalid option entered. Please restart the script and enter 'A' or 'B'." -ForegroundColor Red
 }
